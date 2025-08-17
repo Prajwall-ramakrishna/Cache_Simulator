@@ -1,0 +1,130 @@
+#include <iostream>
+#include <vector>
+#include <list>
+#include <cmath>
+#include <bitset>
+#include <unordered_set>
+using namespace std;
+
+struct CacheLine{
+    bool valid = false;
+    unsigned int tag;
+    int access_count = 0;
+};
+
+class CacheSimulator{
+  int total_blocks;
+  int block_size;
+
+  list<CacheLine> cache;
+  unordered_set<unsigned int> unique_tags;
+  int compulsory_misses = 0, capacity_misses = 0, conflict_misses = 0;
+  int hits = 0, misses = 0;
+  
+public:
+      CacheSimulator(int cache_size, int block_size){
+          this->block_size = block_size;
+          total_blocks = (cache_size/block_size);
+      }
+      
+      void access(unsigned int addr){
+          int offset_bits = log2(block_size);
+          unsigned int tag = (addr >>  offset_bits);
+          
+          bitset<32> addr_bits(addr);
+          bitset<32> tag_bits(tag);
+
+          cout << "Accessing address: " << addr_bits
+             << ", Tag: " << tag_bits << endl;
+        
+
+          bool hit = false;
+          
+          auto it = cache.begin();
+          for(; it != cache.end(); it++){
+              if (it->valid && it->tag == tag){
+                  hit = true;
+                  break;
+              }
+          }
+        //   for (auto &line: cache){
+        //       if (line.valid && line.tag == tag){
+        //           hit = true;
+        //           break;
+        //       }
+        //   }
+          
+          if (hit){
+              hits++;
+              it->access_count++;
+            //   CacheLine line = *it;
+            //   cache.erase(it);
+            //   cache.push_back(line);
+          } else {
+              misses++;
+              if (unique_tags.find(tag) == unique_tags.end()){
+                  compulsory_misses++;
+                  unique_tags.insert(tag);
+              } else {
+                  if(cache.size() >= total_blocks){
+                  capacity_misses++;
+              } else{
+                  conflict_misses++;
+              }
+              }
+              if (cache.size() >= total_blocks){
+                //   cache.pop_front();
+                auto lfu_it = cache.begin();
+                for (auto it = cache.begin(); it != cache.end(); it++){
+                    if (it->access_count < lfu_it->access_count){
+                        lfu_it = it;
+                    }
+                }
+                cache.erase(lfu_it);
+              }
+              cache.push_back({true, tag, 1});
+          }
+      }
+      
+      void printStats(){
+          cout<<"Hits: "<<hits<<", Misses: "<<misses<<endl;
+          cout<<"Compulsory_misses: "<<compulsory_misses<<endl;
+          cout<<"Capacity_misses: "<<capacity_misses<<endl;
+          cout<<"Conflict_misses: "<<conflict_misses<<endl;
+      }
+      
+};
+int main() {
+    CacheSimulator sim(32,4);
+    vector<unsigned int> trace = {
+     // Fill set 0 (should trigger conflict)
+    0x00, 0x10, 0x20, // all map to set 0, different tags
+    0x00, 0x10, 0x30, // reaccess old (test hit or miss based on policy)
+
+    // Fill set 1
+    0x04, 0x14, 0x24,
+    0x04, 0x14, 0x34,
+
+    // Repeat some earlier addresses (test reuse)
+    0x00, 0x10, 0x04, 0x14,
+
+    // Mix of new tags in same sets to cause eviction
+    0x40, 0x50, 0x60, 0x70,
+
+    // Stress test with alternating pattern
+    0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C,
+
+    // Reaccess old ones
+    0x00, 0x04, 0x10, 0x14,
+
+    // Hit/miss challenge
+    0x00, 0x20, 0x10, 0x30, 0x40, 0x50,
+    };
+    
+    for(auto addr: trace){
+        sim.access(addr);
+    }
+    
+    sim.printStats();
+    return 0;
+}

@@ -1,0 +1,427 @@
+#include <iostream>
+#include <vector>
+#include <list>
+#include <cmath>
+#include <iomanip>
+#include <unordered_map>
+#include <fstream>
+#include <sstream>
+using namespace std;
+
+struct CacheLine {
+    bool valid = false;
+    bool dirty = false;
+    unsigned int tag;
+};
+
+class MainMemory{
+    unordered_map<unsigned int, int> memory;
+    int memory_writes = 0;
+    int memory_reads = 0;
+public:
+    int read (unsigned int addr){
+        memory_reads++;
+        return memory[addr];
+    }
+    void write(unsigned int addr, int data = 0){
+        memory[addr] = data;
+        memory_writes++;
+    }
+    
+    void insert(unsigned int addr, bool is_write = false){
+        if(is_write) {
+            write(addr);
+        }
+        else read(addr);
+    }
+    
+    void printStats(){
+        cout << "Main Memory: Reads = " << memory_reads << ", Writes = " << memory_writes << endl;
+    }
+    
+    void printContents(const string& name) const {
+        cout << "\n" << name << " Contents:\n";
+        cout << left << setw(12) << "Address" << "Data\n";
+        for (const auto& line : memory) {
+            cout << left << "0x" << hex << setw(10) << line.first 
+                 << "0x" << setw(8) << line.second << dec << endl;
+        }
+    }
+
+};
+
+class CacheSimulator {
+  int total_blocks;
+  int block_size;
+  int latency;
+  int associativity;
+  int num_sets;
+  bool write_back;
+  bool write_allocate;
+  bool exclusive_mode = false;
+  vector<list<CacheLine>> sets;
+  int hits = 0, misses = 0;
+  int memory_writes = 0;
+  bool bypass_enabled = false;
+  
+  CacheSimulator* next_level = nullptr; 
+  MainMemory* dram = nullptr;
+ 
+public:  
+  enum class ReplacementPolicy{ LRU, FIFO, RANDOM };
+  ReplacementPolicy policy = ReplacementPolicy::LRU;
+  
+  void setReplacementPolicy(ReplacementPolicy p){
+      policy = p;
+  }
+  
+  CacheSimulator (int cache_size, int block_size, int associativity, int latency, bool write_back = true, bool write_allocate = true){
+      this->block_size = block_size;
+      this->total_blocks = cache_size/block_size;
+      this->latency = latency;
+      this->write_back = write_back;
+      this->write_allocate = write_allocate;
+      this->associativity = associativity;
+      this->num_sets = total_blocks/associativity;
+      sets.resize(num_sets);
+  }
+  
+  void setExclusive(bool mode){
+      exclusive_mode = mode;
+  }
+  
+  void enableBypass(bool enable){
+      bypass_enabled = enable;
+  }
+  
+  bool shouldBypass(unsigned int addr){
+      // Example MMIO or streaming address range
+      return (addr >= 0x800 && addr < 0x1000);
+  }
+  
+  void connectLowerLevel(CacheSimulator* nextlvl_csh_ptr){
+      next_level = nextlvl_csh_ptr;
+  }
+  
+  void connectMainMemory(MainMemory* mem){
+      dram = mem;
+  }
+  
+//   void prefetch(unsigned int addr){
+//       if (access(addr, false)) return;
+//       insert(addr);
+//   }
+  
+  bool access(unsigned int addr, bool prefetch_enabled = true){
+      int offset_bits = log2(block_size);
+      int index_bits = log2(num_sets);
+      unsigned int index = (addr >> offset_bits) & ((1 << index_bits) - 1);
+      unsigned int tag = addr >> (index_bits + offset_bits);
+      auto& cache = sets[index];
+      
+      if (bypass_enabled && shouldBypass(addr)){                                         //Bypass Logic for MMIO and streaming data
+          if (next_level) return  next_level->access(addr);
+          else if (dram){
+              dram->read(addr);
+              return false;
+          } else return false;
+      }
+      
+      bool hit = false;
+      auto it = cache.begin();
+      for (; it!=cache.end(); it++){
+          if (it->valid && it->tag == tag){
+              hit = true;
+              break;
+          }
+      }
+      
+      if (hit){
+          hits++;
+          if (policy == ReplacementPolicy::LRU){
+            CacheLine line = *it;
+            cache.erase(it);
+            cache.push_back(line);  
+          }
+          return true;
+      }
+      
+      misses++;
+    //   if (prefetch_enabled){                                   //Next Line Prefetching
+    //       unsigned int next_line_addr = addr + block_size;   
+    //       access(next_line_addr, false);
+    //       insert(next_line_addr);
+    //   }
+      return false;
+  }
+  
+  bool write(unsigned int addr){
+      int offset_bits = log2(block_size);
+      int index_bits = log2(num_sets);
+      unsigned int index = (addr >> offset_bits) & ((1 << index_bits) - 1);
+      unsigned int tag = addr >> (index_bits + offset_bits);
+      auto& cache = sets[index];
+      
+      if (bypass_enabled && shouldBypass(addr)){                                    //Bypass Logic for MMIO and streaming data
+          if (next_level) return  next_level->write(addr);
+          else if (dram){
+              dram->write(addr);
+              return false;
+          } else{
+              memory_writes++;
+              return false;
+          } 
+      }
+      
+      bool hit = false;
+      auto it = cache.begin();
+      for (; it!=cache.end(); it++){
+          if (it->valid && it->tag == tag){
+              hit = true;
+              break;
+          }
+      }
+      
+      if (hit){
+          
+          hits++;
+          if (write_back){
+              it->dirty = true;  // Correctly mark dirty
+          } else {
+              if (next_level) next_level->write(addr);
+              else if(dram) dram->write(addr);
+              else memory_writes++;
+          }
+          if (policy == ReplacementPolicy::LRU){
+            CacheLine line = *it; // Now capture the updated dirty bit
+            cache.erase(it);
+            cache.push_back(line);  
+          }
+          return true;
+      }
+
+      
+      misses++;
+      
+    //   unsigned int next_line_addr = addr + block_size;         //Next Line Prefetching
+    //   access(next_line_addr, false);
+    //   insert(next_line_addr);
+      
+      if (write_allocate){
+          if (write_back) {
+            insert(addr, true);  // ✅ Write-Back + Write-Allocate: insert and mark dirty
+          } else {
+                insert(addr, false); // ✅ Write-Through + Write-Allocate: insert clean
+                if (next_level) next_level->write(addr);  // write through to lower level
+                else if (dram) dram->write(addr);        // or write to memory if no next level
+                else memory_writes++;                     
+            }
+      } else {
+            // ✅ No Write-Allocate: Don't touch cache at all
+            if (next_level) next_level->write(addr);      // just forward write
+            else if (dram) dram->write(addr);             // or write to memory
+            else memory_writes++;                         
+        }
+      return false;
+    }
+  
+  void insert(unsigned int addr, bool is_write = false){
+      int offset_bits = log2(block_size);
+      int index_bits = log2(num_sets);
+      unsigned int index = (addr >> offset_bits) & ((1 << index_bits) - 1);
+      unsigned int tag = addr >> (index_bits + offset_bits);
+      auto& cache = sets[index];
+      
+      for (auto it=cache.begin(); it!=cache.end(); it++){  //Just to be sure if same tag exists before you insert remove it.
+           if (it->valid && it->tag == tag){                //In our design it doesn't matter but in case of prefetching, this logic is needed.
+              cache.erase(it);
+              break;
+            }
+        }
+      
+       if ((int)cache.size() >= associativity){
+          CacheLine evicted;
+          if (policy == ReplacementPolicy::RANDOM){
+              auto it = cache.begin();
+              advance(it, rand()%cache.size());
+              evicted = *it;
+              cache.erase(it);
+          } else{
+              evicted = cache.front();
+              cache.pop_front();
+          }
+          
+           if(evicted.valid){
+               unsigned int evicted_addr = (evicted.tag << (index_bits + offset_bits)) | (index << offset_bits);   //reconstructing addr 
+               if (write_back && evicted.dirty){
+                  if (next_level) next_level->insert(evicted_addr,true);                //Is there a next level cache?
+                  else if (dram) dram->insert(evicted_addr,true); 
+                  else memory_writes++;
+                }
+              if (!exclusive_mode && next_level && !evicted.dirty){       //If you are evicting L1 then flush it to L2.
+                  next_level->insert(evicted_addr,true);
+                }
+            }
+        }
+      
+      // For exclusive caches, evict from next level to ensure uniqueness
+      if (exclusive_mode && next_level) next_level->evict(tag << (index_bits + offset_bits));   //If it is Exclusive mode then before inserting the new tag here,
+        
+       // Finally, insert new line                                                //the same tag must be removed from the higher level.
+      cache.push_back({true, write_back && is_write, tag});                      
+    } 
+  
+  void evict(unsigned int addr){
+      int offset_bits = log2(block_size);
+      int index_bits = log2(num_sets);
+      unsigned int index = (addr >> offset_bits) & ((1 << index_bits) - 1);
+      unsigned int tag = addr >> (index_bits + offset_bits);
+      auto& cache = sets[index];
+      
+      for (auto it=cache.begin(); it!=cache.end(); it++){
+          if(it->valid && it->tag == tag){
+              cache.erase(it);
+              return;
+            }
+        }
+    }
+  
+  void flushAll(bool evict_after_flush = false){
+      int offset_bits = log2(block_size);
+      int index_bits = log2(num_sets);
+      for (int i=0; i<num_sets; i++){
+          auto& cache = sets[i];
+          auto it = cache.begin();
+          while (it!=cache.end()){
+               if (write_back && it->valid && it->dirty){
+                    unsigned int addr = (it->tag << (index_bits + offset_bits)) | (i << offset_bits);
+                    if (next_level) next_level->insert(addr,true);
+                    else if (dram) dram->insert(addr,true);
+                    else memory_writes++;
+                }
+                if (evict_after_flush){
+                    it = cache.erase(it);
+                } else{
+                        it->dirty = false;       //Make it clean since you flushed 
+                        it++;
+                    }
+            }
+        }
+    }
+  
+  int getAccessLatency() const{
+      return latency;
+    }
+  
+  void printStats(const string& name) const{
+      if(write_back) cout << "Write Back:\n";
+      else cout << "Write Through:\n";
+      cout << name << ": Hits: " << hits << " ,Misses: " << misses << endl;
+      
+      if (memory_writes > 0)
+       cout << name << " Untracked memory_writes = " << memory_writes << " (fallback only)\n";
+
+    }
+  
+  void printContents(const string& name) const{
+      cout << "\n" << name << " Cache Contents:\n";
+        cout << left << setw(8) << "Valid" << setw(8) << "Dirty" << "Tag" << endl;
+        for (int i=0; i<num_sets; i++){
+            for (const auto& line : sets[i]) {
+                if (line.valid)
+                    cout << setw(8) << line.valid << setw(8) << line.dirty << "0x" << hex << line.tag << dec << endl;
+            }
+        }
+    }
+};
+
+void runTrace(CacheSimulator& L1, CacheSimulator& L2, CacheSimulator& L3, MainMemory& DRAM, const string& filename) {
+    ifstream trace(filename);
+    if (!trace.is_open()) {
+        cerr << "Failed to open trace file: " << filename << endl;
+        return;
+    }
+
+    string line;
+    while (getline(trace, line)) {
+        istringstream iss(line);
+        char op;
+        string addr_str;
+        if (!(iss >> op >> addr_str)) continue;
+
+        unsigned int addr = stoul(addr_str, nullptr, 0);
+
+        if (op == 'R') {
+            if (!L1.access(addr)) {
+                if (!L2.access(addr)) {
+                    if (!L3.access(addr)) {
+                        DRAM.read(addr);
+                        L3.insert(addr);
+                    }
+                    L2.insert(addr);
+                }
+                L1.insert(addr);
+            }
+        } else if (op == 'W') {
+            L1.write(addr);
+        }
+    }
+
+    trace.close();
+}
+
+int main() {
+    CacheSimulator L1(32,4,4,1);  //(cache_size,block_size,associativitylatency,write_back,write_allocate)
+    CacheSimulator L2(128,4,4,10);   //(128,4,1,10) - DM, (128,4,2,10) - SA, (128,4,32,10) - FA
+    CacheSimulator L3(512,4,4,50);
+    MainMemory DRAM;
+    
+    L1.connectLowerLevel(&L2);
+    L2.connectLowerLevel(&L3);
+    L3.connectMainMemory(&DRAM);
+    
+    //Bypass Logic for MMIO or streaming data where we dont need cache
+    L1.enableBypass(false);
+    L2.enableBypass(false);
+    L3.enableBypass(false);
+    
+    // Enable inclusive or exclusive mode
+    L1.setExclusive(false);   // Set to true for exclusive behavior
+    L2.setExclusive(false);
+    L3.setExclusive(false);
+    
+    //Replacement Policies - (LRU, FIFO, RANDOM)
+    L1.setReplacementPolicy(CacheSimulator::ReplacementPolicy::LRU);
+    L2.setReplacementPolicy(CacheSimulator::ReplacementPolicy::LRU);
+    L3.setReplacementPolicy(CacheSimulator::ReplacementPolicy::LRU);
+    
+    int total_cycles = 0;
+    
+    runTrace(L1, L2, L3, DRAM, "trace.txt");
+
+    cout<<"Befor Flushing";
+    L1.printContents("L1");
+    L2.printContents("L2");
+    L3.printContents("L3");
+    DRAM.printContents("DRAM");
+    cout<<endl;
+
+    //Final Flush
+    L1.flushAll(true);     //True - Evict data to DRAM after flush   // Power-aware cache clear
+    L2.flushAll(true);     //False - Don't evict data to DRAM after flush
+    L3.flushAll(true);
+    
+    //Report
+    L1.printStats("L1");
+    L2.printStats("L2");
+    L3.printStats("L3");
+    DRAM.printStats();
+    cout<<endl;
+    
+    cout<<"After Flushing";
+    L1.printContents("L1");
+    L2.printContents("L2");
+    L3.printContents("L3");
+    DRAM.printContents("DRAM");
+    return 0;
+}

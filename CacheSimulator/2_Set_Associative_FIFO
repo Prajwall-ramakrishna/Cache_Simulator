@@ -1,0 +1,81 @@
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <bitset>
+#include <list>
+using namespace std;
+
+struct CacheLine{
+    bool valid;
+    unsigned int tag;
+};
+
+class CacheSimulator {
+  int cache_size;
+  int block_size;
+  int associativity;
+  int num_sets;
+  vector<list<CacheLine>> cache;
+  int hits = 0, misses = 0;
+
+public:  
+      CacheSimulator(int size, int blocksize, int assoc){
+          cache_size = size;
+          block_size = blocksize;
+          associativity = assoc;
+          num_sets = cache_size/associativity;
+          cache = vector<list<CacheLine>>(num_sets);
+      }
+      
+      void access(unsigned int addr){
+          int offset_bits = log2(block_size);
+          int index_bits = log2(num_sets);
+          unsigned int index = (addr >> offset_bits) & ((1 << index_bits)-1);
+          unsigned int tag = addr >> (index_bits + offset_bits);
+          
+          bitset<32> addr_bits(addr);
+          bitset<32> tag_bits(tag);
+
+          cout << "Accessing address: " << addr_bits
+             << ", Tag: " << tag_bits
+             << ", Index: " << index << endl;
+          
+         auto &set = cache[index];
+         
+         bool hit = false;
+         
+         for(const auto &line: set){
+             if(line.valid && line.tag == tag){
+                 hit = true;
+                 break;
+             }
+         }
+         if (hit){
+             hits++;
+         } else {
+             misses++;
+             if (set.size() >= associativity){
+                 set.pop_front();
+             }
+             set.push_back({true, tag});
+         }
+      }
+      
+      void printStats(){
+           cout<<"Hits: "<<hits<<", Misses: "<<misses<<endl;
+
+      }
+};
+
+int main() {
+    
+    CacheSimulator sim(32,4,2);
+    vector<unsigned int> trace = { 0x00000010, 0x00000011, 0x00000010, 0x000000AA, 0x000000FF, 0x0000001F, 0x000000AA};
+    for(auto addr: trace){
+        sim.access(addr);
+    }
+    
+    sim.printStats();
+
+    return 0;
+}

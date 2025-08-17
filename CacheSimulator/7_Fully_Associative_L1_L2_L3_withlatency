@@ -1,0 +1,143 @@
+#include <iostream>
+#include <vector>
+#include <list>
+#include <cmath>
+using namespace std;
+
+struct CacheLine {
+    bool valid = false;
+    unsigned int tag;
+};
+class CacheSimulator {
+  int total_blocks;
+  int block_size;
+  int latency;
+  list<CacheLine> cache;
+  int hits = 0, misses = 0;
+ 
+public:  
+  CacheSimulator (int cache_size, int block_size, int latency){
+      this->block_size = block_size;
+      total_blocks = cache_size/block_size;
+      this->latency = latency;
+  }
+  
+  bool access(unsigned int addr){
+      int offset_bits = log2(block_size);
+      unsigned int tag = addr >> offset_bits;
+      
+      bool hit = false;
+      auto it = cache.begin();
+      for (; it!=cache.end(); it++){
+          if (it->valid && it->tag == tag){
+              hit = true;
+              break;
+          }
+      }
+      
+      if (hit){
+          hits++;
+          CacheLine line = *it;
+          cache.erase(it);
+          cache.push_back(line);
+          return true;
+      }
+      
+      misses++;
+      return false;
+  }
+  
+  void insert(unsigned int addr){
+      int offset_bits = log2(block_size);
+      unsigned int tag = addr >> offset_bits;
+      
+      for (auto it=cache.begin(); it!=cache.end(); it++){  //Just to be sure if same tag exists before you insert remove it.
+          if (it->valid && it->tag == tag){                //In our design it doesn't matter but in case of prefetching, this logic is needed.
+              cache.erase(it);
+              break;
+          }
+      }
+      
+      if (cache.size() >= total_blocks){
+          cache.pop_front();
+      }
+      
+      cache.push_back({true, tag});
+  } 
+  
+  int getAccessLatency() const{
+      return latency;
+  }
+  
+  void printStats(){
+      cout<<"Hits: "<<hits<<" ,Misses: "<<misses<<endl;
+  }
+};
+
+
+int main() {
+    CacheSimulator L1(64,16,1);  //last argument is latency
+    CacheSimulator L2(128,4,10);
+    CacheSimulator L3(512,4,50);
+    
+    int total_cycles = 0;
+    vector<unsigned int> trace = {
+         // Fill set 0 (should trigger conflict)
+    0x00, 0x10, 0x20, // all map to set 0, different tags
+    0x00, 0x10, 0x30, // reaccess old (test hit or miss based on policy)
+
+    // Fill set 1
+    0x04, 0x14, 0x24,
+    0x04, 0x14, 0x34,
+
+    // Repeat some earlier addresses (test reuse)
+    0x00, 0x10, 0x04, 0x14,
+
+    // Mix of new tags in same sets to cause eviction
+    0x40, 0x50, 0x60, 0x70,
+
+    // Stress test with alternating pattern
+    0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C,
+
+    // Reaccess old ones
+    0x00, 0x04, 0x10, 0x14,
+
+    // Hit/miss challenge
+    0x00, 0x20, 0x10, 0x30, 0x40, 0x50,
+    };
+    
+   for (auto addr : trace) {
+        if (L1.access(addr)) {
+            total_cycles += L1.getAccessLatency();
+            continue;
+        }
+    
+        if (L2.access(addr)) {
+            total_cycles += L1.getAccessLatency() + L2.getAccessLatency();
+            L1.insert(addr);  // promote to L1
+            continue;
+        }
+    
+        if (L3.access(addr)) {
+            total_cycles += L1.getAccessLatency() + L2.getAccessLatency() + L3.getAccessLatency();
+            L2.insert(addr);
+            L1.insert(addr);
+            continue;
+        }
+    
+        // MISS in all levels → fetch from memory
+        total_cycles += L1.getAccessLatency() + L2.getAccessLatency() + L3.getAccessLatency() + 200;
+        L3.insert(addr);
+        L2.insert(addr);
+        L1.insert(addr);
+    }
+
+    
+    L1.printStats();
+    L2.printStats();
+    L3.printStats();
+    cout << "Total Cycles: " << total_cycles << endl;
+    cout << "Average Cycles per Access: " << (float)total_cycles / trace.size() << endl;
+ 
+    return 0;
+}

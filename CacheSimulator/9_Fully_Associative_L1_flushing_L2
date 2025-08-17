@@ -1,0 +1,182 @@
+#include <iostream>
+#include <vector>
+#include <list>
+#include <cmath>
+using namespace std;
+
+struct CacheLine {
+    bool valid = false;
+    bool dirty = false;
+    unsigned int tag;
+};
+class CacheSimulator {
+  int total_blocks;
+  int block_size;
+  int latency;
+  bool write_back;
+  bool write_allocate;
+  list<CacheLine> cache;
+  int hits = 0, misses = 0;
+  int memory_writes = 0;
+  
+  CacheSimulator* next_level = nullptr; 
+ 
+public:  
+  CacheSimulator (int cache_size, int block_size, int latency, bool write_back = true, bool write_allocate = true){
+      this->block_size = block_size;
+      total_blocks = cache_size/block_size;
+      this->latency = latency;
+      this->write_back = write_back;
+      this->write_allocate = write_allocate;
+  }
+  
+  void connectLowerLevel(CacheSimulator* nextlvl_csh_ptr){
+      next_level = nextlvl_csh_ptr;
+  }
+  
+  bool access(unsigned int addr){
+      int offset_bits = log2(block_size);
+      unsigned int tag = addr >> offset_bits;
+      
+      bool hit = false;
+      auto it = cache.begin();
+      for (; it!=cache.end(); it++){
+          if (it->valid && it->tag == tag){
+              hit = true;
+              break;
+          }
+      }
+      
+      if (hit){
+          hits++;
+          CacheLine line = *it;
+          cache.erase(it);
+          cache.push_back(line);
+          return true;
+      }
+      
+      misses++;
+      return false;
+  }
+  
+  bool write(unsigned int addr){
+       int offset_bits = log2(block_size);
+      unsigned int tag = addr >> offset_bits;
+      
+      bool hit = false;
+      auto it = cache.begin();
+      for (; it!=cache.end(); it++){
+          if (it->valid && it->tag == tag){
+              hit = true;
+              break;
+          }
+      }
+      
+      if (hit){
+          hits++;
+          CacheLine line = *it;
+          if (write_back){
+              line.dirty = true;
+          } 
+          cache.erase(it);
+          cache.push_back(line);
+          return true;
+      }
+      
+      misses++;
+      
+      if (write_allocate){
+          insert(addr, true); // Inset new data and make it dirty
+      } else{
+          memory_writes++;  // Memory updated regardless of write-back or write-through
+      }
+      return false;
+  }
+  
+  void insert(unsigned int addr, bool is_write = false){
+      int offset_bits = log2(block_size);
+      unsigned int tag = addr >> offset_bits;
+      
+      for (auto it=cache.begin(); it!=cache.end(); it++){  //Just to be sure if same tag exists before you insert remove it.
+          if (it->valid && it->tag == tag){                //In our design it doesn't matter but in case of prefetching, this logic is needed.
+              cache.erase(it);
+              break;
+          }
+      }
+      
+      if (cache.size() >= total_blocks){
+          CacheLine evicted = cache.front();
+          if (write_back && evicted.valid && evicted.dirty){
+              if (next_level){                                                //Is there a next level cache?
+                 unsigned int evicted_addr = (evicted.tag << offset_bits);
+                 next_level->insert(evicted_addr,true);
+              } else{
+                 memory_writes++;
+                }
+          }
+          cache.pop_front();
+      }
+      
+      cache.push_back({true, write_back && is_write, tag});
+  } 
+  
+  int getAccessLatency() const{
+      return latency;
+  }
+  
+  void printStats(){
+      cout<<"Hits: "<<hits<<" ,Misses: "<<misses<<" ,Memory_writes: "<<memory_writes<<endl;
+  }
+};
+
+
+int main() {
+    CacheSimulator L1(32,4,1,true,true);  //(cache_size,block_size,latency,write_back,write_allocate)
+    CacheSimulator L2(128,4,1,true,true);
+    L1.connectLowerLevel(&L2);
+    
+    int total_cycles = 0;
+    vector<unsigned int> reads_trace = {
+    // Fill set 0 (should trigger conflict)
+    0x00, 0x10, 0x20, // all map to set 0, different tags
+    0x00, 0x10, 0x30, // reaccess old (test hit or miss based on policy)
+
+    // Fill set 1
+    0x04, 0x14, 0x24,
+    0x04, 0x14, 0x34,
+
+    // Repeat some earlier addresses (test reuse)
+    0x00, 0x10, 0x04, 0x14,
+
+    // Mix of new tags in same sets to cause eviction
+    0x40, 0x50, 0x60, 0x70,
+
+    // Stress test with alternating pattern
+    0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C,
+
+    // Reaccess old ones
+    0x00, 0x04, 0x10, 0x14,
+
+    // Hit/miss challenge
+    0x00, 0x20, 0x10, 0x30, 0x40, 0x50,    };
+    
+    for (auto addr : reads_trace) {
+        if (!L1.access(addr)) {
+            if (!L2.access(addr)){
+                L2.insert(addr);   // fetch from memory to L2
+            }
+            L1.insert(addr);      // bring into L1
+        }
+    }
+
+    vector<unsigned int> writes_trace = {
+    0x04, 0x00, 0x20, 0x10, 0xff,
+    0x30, 0x40, 0x50, 0x60, 0x70 };
+    for (auto addr : writes_trace) {
+        L1.write(addr);  // write() already handles insert() internally if needed
+    }
+
+    L1.printStats();
+    L2.printStats();
+    return 0;
+}
